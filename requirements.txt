@@ -1,0 +1,3 @@
+aiogram==3.20.0.post0
+environs==14.2.0
+peewee==3.18.1

@@ -1,0 +1,758 @@
+from aiogram import types, F, Router
+from aiogram.types import InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+
+from core.filters.filters import IsDirectAdminCallback, IsDirectAdminMessage
+from core.keyboards.inline import (
+    return_to_quest_settings,
+    skip_achievement_shortcut,
+    continue_finish_quest_creating,
+    continue_finish_cancel_quest_creating,
+    quest_menu,
+)
+from core.states.quest_states import (
+    ChooseQuestMenu,
+    CreateQuest,
+    CreateQuestLevel,
+    ChangeTextOfRiddle,
+    ChangeAnswer,
+    ChangeMoneyReward,
+    ChangeSkillpointsReward,
+)
+from core.utils.quest_utils import getting_main_quest_info, getting_quest_level_info
+from core.db.models import Achievement, MainQuest, QuestLevel
+
+
+quest_manage_commands_router = Router()
+
+
+# quest-settings menu
+@quest_manage_commands_router.callback_query(
+    IsDirectAdminCallback(), F.data == "quest_menu"
+)
+async def quest_settings_menu(query: types.CallbackQuery, state: FSMContext = None):
+    if state is not None:
+        await state.clear()
+    await query.bot.edit_message_text(
+        "Choose one of the options",
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+        reply_markup=quest_menu,
+    )
+    await state.set_state(ChooseQuestMenu.CHOOSE_BUTTON)
+    await query.answer()
+
+
+# callback to create quest
+@quest_manage_commands_router.callback_query(
+    ChooseQuestMenu.CHOOSE_BUTTON, IsDirectAdminCallback(), F.data == "create_quest"
+)
+async def create_quest(query: types.CallbackQuery, state: FSMContext):
+    last_message = query.message
+    await query.bot.edit_message_text(
+        "Type the name of the new quest",
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+        reply_markup=return_to_quest_settings,
+    )
+    await state.update_data(message=last_message)
+    await state.set_state(CreateQuest.GET_QUEST_NAME)
+    await query.answer()
+
+
+# gets name of the quest
+@quest_manage_commands_router.message(
+    CreateQuest.GET_QUEST_NAME, IsDirectAdminMessage(), F.text.regexp(r".+")
+)
+async def get_quest_name(message: types.Message, state: FSMContext):
+    if len(message.text) > 50:
+        await message.answer("50 symbols limit")
+        return 0
+    state_data = await state.get_data()
+    last_message = state_data["message"]
+    await message.bot.delete_message(
+        chat_id=last_message.chat.id, message_id=last_message.message_id
+    )
+    last_message = await message.bot.send_message(
+        chat_id=message.chat.id,
+        text="Type the welcome message for the quest",
+        reply_markup=return_to_quest_settings,
+    )
+    await state.update_data(quest_name=message.text, message=last_message)
+    await state.set_state(CreateQuest.GET_QUEST_TEXT)
+
+
+# getting main quest's text
+@quest_manage_commands_router.message(
+    CreateQuest.GET_QUEST_TEXT, IsDirectAdminMessage(), F.text.regexp(r"(?:.\s?)+")
+)
+async def get_quest_text(message: types.Message, state: FSMContext):
+    state_data = await state.get_data()
+    last_message = state_data["message"]
+    await message.bot.delete_message(
+        chat_id=last_message.chat.id, message_id=last_message.message_id
+    )
+    last_message = await message.bot.send_message(
+        chat_id=message.chat.id,
+        text="Type the identificator of the achievement to add, or skip by pressing the button",
+        reply_markup=skip_achievement_shortcut,
+    )
+    await state.update_data(quest_text=message.text, message=last_message)
+    await state.set_state(CreateQuest.GET_QUEST_ACHIEVEMENT_CODE)
+
+
+# getting achievement shortcut-code
+@quest_manage_commands_router.message(
+    CreateQuest.GET_QUEST_ACHIEVEMENT_CODE,
+    IsDirectAdminMessage(),
+    F.text.regexp(r"\w{6}"),
+)
+async def get_achievement_code(message: types.Message, state: FSMContext):
+    state_data = await state.get_data()
+    last_message = state_data["message"]
+    achievement = Achievement.select().where(
+        Achievement.achievement_shortcut == message.text
+    )
+    if achievement.exists():
+        quest_name = await state.get_data()
+        quest_name = quest_name["quest_name"]
+        quest_info = f"Quest name:\n{quest_name}\n\nAchievement id: {message.text}\n\nLet's create the first level of your quest. Type the riddle of the first level"
+        await message.bot.delete_message(
+            chat_id=last_message.chat.id, message_id=last_message.message_id
+        )
+        last_message = await message.bot.send_message(
+            chat_id=message.chat.id,
+            text=quest_info,
+            reply_markup=return_to_quest_settings,
+        )
+        await state.update_data(
+            achievement_shortcut=message.text, level_number=1, message=last_message
+        )
+        await state.set_state(CreateQuestLevel.GET_LEVEL_QUESTION)
+    else:
+        await message.answer(
+            "The wrong identificator was given. Try again"
+        )
+        return 0
+
+
+# or skipping achievement shortcut
+@quest_manage_commands_router.callback_query(
+    CreateQuest.GET_QUEST_ACHIEVEMENT_CODE,
+    IsDirectAdminCallback(),
+    F.data.startswith("skip_achievement_setting"),
+)
+async def skip_achievement_code(query: types.CallbackQuery, state: FSMContext):
+    state_data = await state.get_data()
+    last_message = state_data["message"]
+    quest_name = state_data["quest_name"]
+    quest_info = f"Quest name:\n{quest_name}\n\nAchievement id: skipped\n\nLet's create the first level of your quest. Type the riddle of the first level"
+    await query.bot.delete_message(
+        chat_id=last_message.chat.id, message_id=last_message.message_id
+    )
+    last_message = await query.bot.send_message(
+        chat_id=query.message.chat.id,
+        text=quest_info,
+        reply_markup=return_to_quest_settings,
+    )
+    await state.update_data(
+        achievement_shortcut=None, level_number=1, message=last_message
+    )
+    await state.set_state(CreateQuestLevel.GET_LEVEL_QUESTION)
+    await query.answer()
+
+
+# getting text of riddle to quest's level
+@quest_manage_commands_router.message(
+    CreateQuestLevel.GET_LEVEL_QUESTION,
+    IsDirectAdminMessage(),
+    F.text.regexp(r"(?:.\s?)+"),
+)
+async def get_level_question(message: types.Message, state: FSMContext):
+    state_data = await state.get_data()
+    last_message = state_data["message"]
+    await message.bot.delete_message(
+        chat_id=last_message.chat.id, message_id=last_message.message_id
+    )
+    last_message = await message.bot.send_message(
+        chat_id=message.chat.id,
+        text="Type the answer of the riddle",
+        reply_markup=return_to_quest_settings,
+    )
+    await state.update_data(level_question=message.text, message=last_message)
+    await state.set_state(CreateQuestLevel.GET_LEVEL_ANSWER)
+
+
+# getting answer to the riddle of quest's level
+@quest_manage_commands_router.message(
+    CreateQuestLevel.GET_LEVEL_ANSWER, IsDirectAdminMessage(), F.text.regexp(".+")
+)
+async def get_level_answer(message: types.Message, state: FSMContext):
+    if len(message.text) > 512:
+        await message.answer("512 symbols limit")
+        return 0
+    state_data = await state.get_data()
+    last_message = state_data["message"]
+    await message.bot.delete_message(
+        chat_id=last_message.chat.id, message_id=last_message.message_id
+    )
+    last_message = await message.bot.send_message(
+        chat_id=message.chat.id,
+        text="Type the amount of in-game currency reward for passing this level",
+        reply_markup=return_to_quest_settings,
+    )
+    await state.update_data(level_answer=message.text.lower(), message=last_message)
+    await state.set_state(CreateQuestLevel.GET_LEVEL_MONEY)
+
+
+# getting amount of reward-money for passing a level
+@quest_manage_commands_router.message(
+    CreateQuestLevel.GET_LEVEL_MONEY,
+    IsDirectAdminMessage(),
+    F.text.regexp(r"\b[-+]?\d+$"),
+)
+async def get_level_reward_money(message: types.Message, state: FSMContext):
+    state_data = await state.get_data()
+    last_message = state_data["message"]
+    await message.bot.delete_message(
+        chat_id=last_message.chat.id, message_id=last_message.message_id
+    )
+    last_message = await message.bot.send_message(
+        chat_id=message.chat.id,
+        text="Type the amount of skill points reward for passing this level",
+        reply_markup=return_to_quest_settings,
+    )
+    await state.update_data(level_reward_money=int(message.text), message=last_message)
+    await state.set_state(CreateQuestLevel.GET_LEVEL_SKILLPOINTS)
+
+
+# getting amount of reward skill points for passing a level
+@quest_manage_commands_router.message(
+    CreateQuestLevel.GET_LEVEL_SKILLPOINTS,
+    IsDirectAdminMessage(),
+    F.text.regexp(r"\b[-+]?\d+$"),
+)
+async def get_level_reward_skill(message: types.Message, state: FSMContext):
+    state_data = await state.get_data()
+    last_message = state_data["message"]
+    level_number = state_data["level_number"]
+    if level_number > 1:
+        keyboard = continue_finish_quest_creating
+    else:
+        keyboard = continue_finish_cancel_quest_creating
+    await message.bot.delete_message(
+        chat_id=last_message.chat.id, message_id=last_message.message_id
+    )
+    last_message = await message.bot.send_message(
+        chat_id=message.chat.id,
+        text="Add more levels or finish at this point?",
+        reply_markup=keyboard,
+    )
+    await state.update_data(level_reward_skill=int(message.text), message=last_message)
+    await state.set_state(CreateQuestLevel.WAIT_FOR_CONFIRMATION)
+
+
+# if admin chooses to finish
+@quest_manage_commands_router.callback_query(
+    CreateQuestLevel.WAIT_FOR_CONFIRMATION,
+    IsDirectAdminCallback(),
+    F.data == "finish_create",
+)
+async def finish_creating_quest(query: types.CallbackQuery, state: FSMContext):
+    quest_info = await state.get_data()
+    last_message = quest_info["message"]
+    if quest_info["level_number"] == 1:
+        quest_name = quest_info["quest_name"]
+        quest_text = quest_info["quest_text"]
+        quest_achievement = quest_info["achievement_shortcut"]
+        level_question = quest_info["level_question"]
+        level_answer = quest_info["level_answer"]
+        level_reward = quest_info["level_reward_money"]
+        level_skill_points = quest_info["level_reward_skill"]
+        main_quest = MainQuest.create(
+            quest_name=quest_name,
+            quest_text=quest_text,
+            quest_achievement=quest_achievement,
+        )
+        QuestLevel.create(
+            main_quest=main_quest,
+            level_number=quest_info["level_number"],
+            level_question=level_question,
+            level_answer=level_answer,
+            level_reward_money=level_reward,
+            level_reward_skill=level_skill_points,
+            level_last_status=True,
+        )
+        await query.bot.send_message(query.from_user.id, text="✅ Quest was successfully created")
+        await query.bot.delete_message(
+            chat_id=last_message.chat.id, message_id=last_message.message_id
+        )
+        await query.bot.send_message(
+            chat_id=query.message.chat.id,
+            text="Choose one of the options",
+            reply_markup=quest_menu,
+        )
+        await state.clear()
+        await query.answer()
+    else:
+        level_question = quest_info["level_question"]
+        level_answer = quest_info["level_answer"]
+        level_reward = quest_info["level_reward_money"]
+        level_skill_points = quest_info["level_reward_skill"]
+        main_quest = quest_info["main_quest"]
+        QuestLevel.create(
+            main_quest=main_quest,
+            level_number=quest_info["level_number"],
+            level_question=level_question,
+            level_answer=level_answer,
+            level_reward_money=level_reward,
+            level_reward_skill=level_skill_points,
+            level_last_status=True,
+        )
+        await query.bot.send_message(query.from_user.id, text="✅ Quest was successfully created")
+        await query.bot.delete_message(
+            chat_id=last_message.chat.id, message_id=last_message.message_id
+        )
+        await query.bot.send_message(
+            chat_id=query.message.chat.id,
+            text="Choose one of the options",
+            reply_markup=quest_menu,
+        )
+        await state.clear()
+        await query.answer()
+
+
+# if admin chooses to continue creating quest
+@quest_manage_commands_router.callback_query(
+    CreateQuestLevel.WAIT_FOR_CONFIRMATION,
+    IsDirectAdminCallback(),
+    F.data == "continue_create",
+)
+async def continue_creating_quest(query: types.CallbackQuery, state: FSMContext):
+    quest_info = await state.get_data()
+    last_message = quest_info["message"]
+    if quest_info["level_number"] == 1:
+        quest_name = quest_info["quest_name"]
+        quest_text = quest_info["quest_text"]
+        quest_achievement = quest_info["achievement_shortcut"]
+        level_number = quest_info["level_number"]
+        level_question = quest_info["level_question"]
+        level_answer = quest_info["level_answer"]
+        level_reward = quest_info["level_reward_money"]
+        level_skill_points = quest_info["level_reward_skill"]
+        main_quest = MainQuest.create(
+            quest_name=quest_name,
+            quest_text=quest_text,
+            quest_achievement=quest_achievement,
+        )
+        QuestLevel.create(
+            main_quest=main_quest,
+            level_number=level_number,
+            level_question=level_question,
+            level_answer=level_answer,
+            level_reward_money=level_reward,
+            level_reward_skill=level_skill_points,
+            level_last_status=False,
+        )
+        level_number += 1
+        await query.bot.delete_message(
+            chat_id=last_message.chat.id, message_id=last_message.message_id
+        )
+        last_message = await query.bot.send_message(
+            chat_id=query.message.chat.id,
+            text="Type the riddle for the new level",
+            reply_markup=return_to_quest_settings,
+        )
+        await state.update_data(
+            main_quest=main_quest, level_number=level_number, message=last_message
+        )
+        await state.set_state(CreateQuestLevel.GET_LEVEL_QUESTION)
+        await query.answer()
+    else:
+        level_number = quest_info["level_number"]
+        level_question = quest_info["level_question"]
+        level_answer = quest_info["level_answer"]
+        level_reward = quest_info["level_reward_money"]
+        level_skill_points = quest_info["level_reward_skill"]
+        main_quest = quest_info["main_quest"]
+        QuestLevel.create(
+            main_quest=main_quest,
+            level_number=level_number,
+            level_question=level_question,
+            level_answer=level_answer,
+            level_reward_money=level_reward,
+            level_reward_skill=level_skill_points,
+            level_last_status=False,
+        )
+        level_number += 1
+        await query.bot.delete_message(
+            chat_id=last_message.chat.id, message_id=last_message.message_id
+        )
+        last_message = await query.bot.send_message(
+            chat_id=query.message.chat.id,
+            text="Type the riddle for the new level",
+            reply_markup=return_to_quest_settings,
+        )
+        await state.update_data(level_number=level_number, message=last_message)
+        await state.set_state(CreateQuestLevel.GET_LEVEL_QUESTION)
+        await query.answer()
+
+# getting the list of quests to manage them
+@quest_manage_commands_router.callback_query(
+    IsDirectAdminCallback(), F.data == "quest_list"
+)
+async def open_quests_list(query: types.CallbackQuery):
+    quests = MainQuest.select()
+    if quests.exists():
+        quest_list_builder = InlineKeyboardBuilder()
+        for quest in quests:
+            quest_list_builder.add(
+                InlineKeyboardButton(
+                    text=f"{quest.quest_name}", callback_data=f"open_quest_{quest.id}"
+                )
+            )
+        quest_list_builder.add(
+            InlineKeyboardButton(text="↩️ Go back", callback_data="quest_menu")
+        )
+        quest_list_builder.adjust(1)
+        await query.bot.edit_message_text(
+            "Choose a quest from the list below",
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=quest_list_builder.as_markup(),
+        )
+        await query.answer()
+    else:
+        await query.answer("Oops! No quests found")
+
+
+# getting information about specific quest
+@quest_manage_commands_router.callback_query(
+    IsDirectAdminCallback(), F.data.startswith("open_quest_")
+)
+async def open_quest(query: types.CallbackQuery):
+    quest_id = int(query.data.split("_")[-1])
+    quest = MainQuest.select().where(MainQuest.id == quest_id)
+    if quest.exists():
+        quest = quest.get()
+        message_text, buttons = getting_main_quest_info(quest)
+        await query.bot.edit_message_text(
+            message_text,
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=buttons,
+        )
+    else:
+        await query.bot.edit_message_text(
+            "Choose one of the options",
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=quest_menu,
+        )
+        await query.answer("No such quest found")
+
+
+# publish hidden quest
+@quest_manage_commands_router.callback_query(
+    IsDirectAdminCallback(), F.data.startswith("publish_")
+)
+async def publish_quest(query: types.CallbackQuery):
+    quest_id = int(query.data.split("_")[-1])
+    quest = MainQuest.select().where(MainQuest.id == quest_id)
+    if quest.exists():
+        quest = quest.get()
+        quest.quest_publish = True
+        quest.save()
+        quest = MainQuest.select().where(MainQuest.id == quest_id).get()
+        message_text, buttons = getting_main_quest_info(quest)
+        await query.bot.edit_message_text(
+            message_text,
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=buttons,
+        )
+    else:
+        await query.bot.edit_message_text(
+            "Choose one of the options",
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=quest_menu,
+        )
+        await query.answer("No such quest found")
+
+
+@quest_manage_commands_router.callback_query(
+    IsDirectAdminCallback(), F.data.startswith("unpublish_")
+)
+async def unpublish_quest(query: types.CallbackQuery):
+    quest_id = int(query.data.split("_")[-1])
+    quest = MainQuest.select().where(MainQuest.id == quest_id)
+    if quest.exists():
+        quest = quest.get()
+        quest.quest_publish = False
+        quest.save()
+        quest = MainQuest.select().where(MainQuest.id == quest_id).get()
+        message_text, buttons = getting_main_quest_info(quest)
+        await query.bot.edit_message_text(
+            message_text,
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=buttons,
+        )
+    else:
+        await query.bot.edit_message_text(
+            "Choose one of the options",
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=quest_menu,
+        )
+        await query.answer("No such quest found")
+
+
+# delete existing quest
+@quest_manage_commands_router.callback_query(
+    IsDirectAdminCallback(), F.data.startswith("quest_delete_")
+)
+async def delete_quest(query: types.CallbackQuery):
+    quest_id = int(query.data.split("_")[-1])
+    quest = MainQuest.select().where(MainQuest.id == quest_id)
+    if quest.exists():
+        quest = quest.get()
+        quest.delete_instance(recursive=True)
+        await query.bot.edit_message_text(
+            "Choose one of the options",
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=quest_menu,
+        )
+        await query.answer("✅ successfully deleted")
+
+
+# get info about specific level of the quest
+@quest_manage_commands_router.callback_query(
+    IsDirectAdminCallback(), F.data.startswith("level_id_")
+)
+async def open_quest_level(query: types.CallbackQuery):
+    level_id = int(query.data.split("_")[-1])
+    level = QuestLevel.select().where(QuestLevel.id == level_id)
+    if level.exists():
+        level = level.get()
+        message_text, buttons = getting_quest_level_info(level)
+        await query.bot.edit_message_text(
+            message_text,
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=buttons,
+        )
+        await query.answer()
+    else:
+        await query.bot.edit_message_text(
+            "Choose one of the options",
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=quest_menu,
+        )
+        await query.answer("No such level found")
+
+
+# if you decided to change riddle of the quest's level
+@quest_manage_commands_router.callback_query(
+    IsDirectAdminCallback(), F.data.startswith("riddle_text_change_")
+)
+async def change_riddle(query: types.CallbackQuery, state: FSMContext):
+    await query.bot.edit_message_text(
+        "Type the riddle for the new level",
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+        reply_markup=return_to_quest_settings,
+    )
+    await state.update_data(level_id=int(query.data.split("_")[-1]), query=query)
+    await state.set_state(ChangeTextOfRiddle.GET_NEW_TEXT_OF_RIDDLE)
+
+
+# getting new text of the riddle and setting it to quest's level
+@quest_manage_commands_router.message(
+    ChangeTextOfRiddle.GET_NEW_TEXT_OF_RIDDLE,
+    IsDirectAdminMessage(),
+    F.text.regexp(r"(?:.\s?)+"),
+)
+async def get_new_text_of_riddle(message: types.Message, state: FSMContext):
+    state_data = await state.get_data()
+    query = state_data["query"]
+    level_id = state_data["level_id"]
+    level = QuestLevel.select().where(QuestLevel.id == level_id)
+    if level.exists():
+        level = level.get()
+        level.level_question = message.text
+        level.save()
+        level = QuestLevel.select().where(QuestLevel.id == level_id).get()
+        message_text, buttons = getting_quest_level_info(level)
+        await query.bot.edit_message_text(
+            message_text,
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=buttons,
+        )
+        await state.clear()
+    else:
+        await query.bot.edit_message_text(
+            "Choose one of the options",
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=quest_menu,
+        )
+        await state.clear()
+        await query.answer("No such level found")
+
+
+# if you decided to change the answer to the quest's level
+@quest_manage_commands_router.callback_query(
+    IsDirectAdminCallback(), F.data.startswith("answer_change_")
+)
+async def change_answer(query: types.CallbackQuery, state: FSMContext):
+    await query.bot.edit_message_text(
+        "Type a new answer to the riddle",
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+        reply_markup=return_to_quest_settings,
+    )
+    await state.update_data(level_id=int(query.data.split("_")[-1]), query=query)
+    await state.set_state(ChangeAnswer.GET_NEW_ANSWER)
+
+
+# getting new answer and setting it to quest's level
+@quest_manage_commands_router.message(
+    ChangeAnswer.GET_NEW_ANSWER, IsDirectAdminMessage(), F.text.regexp(r".+")
+)
+async def get_new_answer(message: types.Message, state: FSMContext):
+    if len(message.text) > 512:
+        await message.answer("512 symbols limit")
+        return 0
+    state_data = await state.get_data()
+    query = state_data["query"]
+    level_id = state_data["level_id"]
+    level = QuestLevel.select().where(QuestLevel.id == level_id)
+    if level.exists():
+        level = level.get()
+        level.level_answer = message.text.lower()
+        level.save()
+        level = QuestLevel.select().where(QuestLevel.id == level_id).get()
+        message_text, buttons = getting_quest_level_info(level)
+        await query.bot.edit_message_text(
+            message_text,
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=buttons,
+        )
+        await state.clear()
+    else:
+        await query.bot.edit_message_text(
+            "Choose one of the options",
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=quest_menu,
+        )
+        await state.clear()
+        await message.answer("No such level found")
+
+
+# if you decided to change reward-money of the quest's level
+@quest_manage_commands_router.callback_query(
+    IsDirectAdminCallback(), F.data.startswith("reward_change_")
+)
+async def change_money_reward(query: types.CallbackQuery, state: FSMContext):
+    await query.bot.edit_message_text(
+        "Enter a new monetary reward",
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+        reply_markup=return_to_quest_settings,
+    )
+    await state.update_data(level_id=int(query.data.split("_")[-1]), query=query)
+    await state.set_state(ChangeMoneyReward.GET_NEW_MONEY_REWARD)
+
+
+# getting amount of reward and setting it to quest's level
+@quest_manage_commands_router.message(
+    ChangeMoneyReward.GET_NEW_MONEY_REWARD,
+    IsDirectAdminMessage(),
+    F.text.regexp(r"\b[-+]?\d+$"),
+)
+async def get_new_money_reward(message: types.Message, state: FSMContext):
+    state_data = await state.get_data()
+    query = state_data["query"]
+    level_id = state_data["level_id"]
+    level = QuestLevel.select().where(QuestLevel.id == level_id)
+    if level.exists():
+        level = level.get()
+        level.level_reward_money = int(message.text)
+        level.save()
+        level = QuestLevel.select().where(QuestLevel.id == level_id).get()
+        message_text, buttons = getting_quest_level_info(level)
+        await query.bot.edit_message_text(
+            message_text,
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=buttons,
+        )
+        await state.clear()
+    else:
+        await query.bot.edit_message_text(
+            "Choose one of the options",
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=quest_menu,
+        )
+        await state.clear()
+        await message.answer("No such level found")
+
+
+# if you decided to change reward skill points of the quest's level
+@quest_manage_commands_router.callback_query(
+    IsDirectAdminCallback(), F.data.startswith("skill_change_")
+)
+async def change_skillpoints_reward(query: types.CallbackQuery, state: FSMContext):
+    await query.bot.edit_message_text(
+        "Enter a new number of skill points",
+        chat_id=query.message.chat.id,
+        message_id=query.message.message_id,
+        reply_markup=return_to_quest_settings,
+    )
+    await state.update_data(level_id=int(query.data.split("_")[-1]), query=query)
+    await state.set_state(ChangeSkillpointsReward.GET_NEW_SKILLPOINTS_REWARD)
+
+
+# getting amount of skill points and setting it to quest's level
+@quest_manage_commands_router.message(
+    ChangeSkillpointsReward.GET_NEW_SKILLPOINTS_REWARD,
+    IsDirectAdminMessage(),
+    F.text.regexp(r"\b[-+]?\d+$"),
+)
+async def get_new_skillpoints_reward(message: types.Message, state: FSMContext):
+    state_data = await state.get_data()
+    query = state_data["query"]
+    level_id = state_data["level_id"]
+    level = QuestLevel.select().where(QuestLevel.id == level_id)
+    if level.exists():
+        level = level.get()
+        level.level_reward_skill = int(message.text)
+        level.save()
+        level = QuestLevel.select().where(QuestLevel.id == level_id).get()
+        message_text, buttons = getting_quest_level_info(level)
+        await query.bot.edit_message_text(
+            message_text,
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=buttons,
+        )
+        await state.clear()
+    else:
+        await query.bot.edit_message_text(
+            "Choose one of the options",
+            chat_id=query.message.chat.id,
+            message_id=query.message.message_id,
+            reply_markup=quest_menu,
+        )
+        await state.clear()
+        await message.answer("No such level found")
